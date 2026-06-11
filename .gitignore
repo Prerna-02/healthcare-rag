@@ -1,0 +1,22 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Data — never commit PDFs or vector store to git
+docs/
+chroma_db/
+
+# Evaluation outputs
+eval/results/
+
+# Python packaging artifacts
+*.egg-info/
+dist/
+build/
+
+# Conda transient pip-requirements file (created during env create/update)
+condaenv.*.requirements.txt

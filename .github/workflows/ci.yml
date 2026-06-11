@@ -1,0 +1,35 @@
+name: CI
+
+# Lightweight CI: syntax + lint only.
+# The model (Ollama/Qwen3), embeddings, and RAGAS run locally on CPU and
+# cannot run on GitHub's free runners, so heavy integration is intentionally
+# excluded here. This gate catches syntax errors, undefined names, and unused
+# imports on every push and PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+
+      - name: Syntax check (py_compile)
+        run: python -m compileall -q config.py phase1_starter_code.py app.py src eval
+
+      - name: Lint (pyflakes + syntax rules)
+        # F = pyflakes (undefined names, unused imports), E9 = syntax errors.
+        # Formatting rules (line length etc.) are intentionally not enforced yet.
+        run: ruff check --select F,E9 .

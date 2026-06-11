@@ -1,0 +1,246 @@
+"""
+Healthcare Knowledge Navigator — Phase 1
+Stack: LangChain · Ollama (llama3.1:8b, local) · HuggingFace Embeddings · ChromaDB
+
+Prerequisites:
+  1. conda env create -f environment.yml && conda activate healthcare-rag
+  2. ollama pull llama3.1:8b   (Ollama must be running: ollama serve)
+  3. Drop PDFs into ./docs/
+  4. python phase1_starter_code.py
+"""
+
+import re
+from pathlib import Path
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_ollama import ChatOllama
+from langchain.prompts import PromptTemplate
+from langchain.schema.runnable import RunnablePassthrough
+from langchain.schema.output_parser import StrOutputParser
+
+import config
+
+
+# ── Document loading ─────────────────────────────────────────────────────────
+
+def load_documents() -> list:
+    pdf_files = list(config.DOCS_DIR.glob("*.pdf"))
+    if not pdf_files:
+        raise FileNotFoundError(f"No PDFs in '{config.DOCS_DIR}'. Add documents and retry.")
+
+    docs = []
+    for path in pdf_files:
+        print(f"  Loading: {path.name}")
+        pages = PyPDFLoader(str(path)).load()
+        for page in pages:
+            page.metadata.update({
+                "source_filename": path.name,
+                "evidence_level": "unknown",
+                "is_current": True,
+            })
+        docs.extend(pages)
+
+    print(f"  {len(docs)} pages from {len(pdf_files)} file(s)\n")
+    return docs
+
+
+# ── Chunking ─────────────────────────────────────────────────────────────────
+
+def chunk_documents(docs: list) -> list:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config.CHUNK_SIZE,
+        chunk_overlap=config.CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+    chunks = splitter.split_documents(docs)
+    print(f"  {len(chunks)} chunks (size={config.CHUNK_SIZE}, overlap={config.CHUNK_OVERLAP})\n")
+    return chunks
+
+
+# ── Vector store ─────────────────────────────────────────────────────────────
+
+def build_vectorstore(chunks: list) -> Chroma:
+    embeddings = HuggingFaceEmbeddings(
+        model_name=config.EMBED_MODEL,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+
+    if config.CHROMA_DIR.exists() and any(config.CHROMA_DIR.iterdir()):
+        print("  Loading existing ChromaDB...")
+        store = Chroma(persist_directory=str(config.CHROMA_DIR), embedding_function=embeddings)
+    else:
+        print("  Embedding chunks — first run takes ~1 min...")
+        store = Chroma.from_documents(chunks, embeddings, persist_directory=str(config.CHROMA_DIR))
+
+    print(f"  {store._collection.count()} chunks indexed\n")
+    return store
+
+
+# ── Retrieval with confidence scoring ────────────────────────────────────────
+# Real similarity scores from ChromaDB (0.0 = no match → 1.0 = perfect).
+# If you see consistent LOW scores, increase CHUNK_SIZE in config.py and
+# delete chroma_db/ to force a rebuild.
+
+def retrieve_with_confidence(store: Chroma, query: str):
+    results = store.similarity_search_with_relevance_scores(query, k=config.TOP_K)
+    docs    = [doc for doc, _ in results]
+    scores  = [score for _, score in results]
+    avg     = sum(scores) / len(scores) if scores else 0.0
+
+    if avg > config.CONF_HIGH:
+        level = "HIGH"
+    elif avg > config.CONF_MEDIUM:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+
+    return docs, scores, level, avg
+
+
+# ── Guardrails ────────────────────────────────────────────────────────────────
+
+_EMERGENCY_RE = re.compile(
+    r"chest pain.+right now|i('m| am) (having|experiencing)|cant? breathe|call.*(911|999)",
+    re.IGNORECASE,
+)
+_REFUSE_RE = re.compile(
+    r"diagnose (me|my patient)|what (do i|does my patient) have"
+    r"|should i prescribe|what dose should i (give|prescribe)",
+    re.IGNORECASE,
+)
+
+
+def classify_query(query: str) -> tuple[str, str | None]:
+    if _EMERGENCY_RE.search(query):
+        return "block", (
+            "⚠️  This sounds like a medical emergency. "
+            "Call emergency services (911/999) immediately. "
+            "This system cannot provide emergency guidance."
+        )
+    if _REFUSE_RE.search(query):
+        return "block", (
+            "This system is for educational reference only. "
+            "It cannot assist with patient-specific diagnosis or prescribing."
+        )
+    if re.search(r"\bmy patient\b", query, re.IGNORECASE):
+        return "warn", None
+    return "ok", None
+
+
+# ── Medical system prompt ─────────────────────────────────────────────────────
+
+_PROMPT = PromptTemplate.from_template("""You are a Healthcare Knowledge Assistant for medical professionals and students.
+Answer ONLY from the context below. If the answer is not in the context, say:
+"I don't have sufficient evidence in my knowledge base to answer this reliably."
+
+Rules:
+- Never diagnose a patient or prescribe treatment for an individual.
+- Cite the source document for every factual claim.
+- If evidence is limited or conflicting, say so explicitly.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer (with citations):
+
+---
+Disclaimer: For educational purposes only. Not a substitute for clinical judgment.
+""")
+
+
+# ── RAG chain ─────────────────────────────────────────────────────────────────
+
+def build_chain(store: Chroma):
+    llm       = ChatOllama(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE, think=False)
+    retriever = store.as_retriever(search_kwargs={"k": config.TOP_K})
+
+    chain = (
+        {"context": retriever | (lambda docs: "\n\n".join(d.page_content for d in docs)),
+         "question": RunnablePassthrough()}
+        | _PROMPT
+        | llm
+        | StrOutputParser()
+    )
+    return chain
+
+
+# ── Citation formatter ────────────────────────────────────────────────────────
+
+def format_citations(docs: list) -> str:
+    seen, lines = set(), []
+    for i, doc in enumerate(docs, 1):
+        key = f"{doc.metadata.get('source_filename')}:{doc.metadata.get('page')}"
+        if key not in seen:
+            seen.add(key)
+            lines.append(
+                f"  [{i}] {doc.metadata.get('source_filename')} "
+                f"— page {doc.metadata.get('page', 0) + 1}"
+            )
+    return "\n".join(lines)
+
+
+# ── Main Q&A ─────────────────────────────────────────────────────────────────
+
+def ask(store: Chroma, chain, question: str):
+    print(f"\n{'─' * 60}")
+    print(f"Q: {question}")
+    print('─' * 60)
+
+    status, msg = classify_query(question)
+    if status == "block":
+        print(f"\n🚫 {msg}\n")
+        return
+    if status == "warn":
+        print("⚠️  Patient-specific query — providing general educational information only.\n")
+
+    docs, scores, level, avg = retrieve_with_confidence(store, question)
+
+    badge = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}[level]
+    print(f"Retrieval confidence: {badge} {level}  (avg={avg:.3f}, scores={[round(s,3) for s in scores]})")
+    if level == "LOW":
+        print("  ↳ Try increasing CHUNK_SIZE in config.py, then delete chroma_db/ and rerun.")
+
+    answer = chain.invoke(question)
+    print(f"\n{answer}")
+    print(f"\nSources:\n{format_citations(docs)}\n")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  Healthcare Knowledge Navigator — Phase 1")
+    print(f"  Model: {config.LLM_MODEL}  |  Embeddings: {config.EMBED_MODEL}")
+    print("=" * 60 + "\n")
+
+    docs   = load_documents()
+    chunks = chunk_documents(docs)
+    store  = build_vectorstore(chunks)
+    chain  = build_chain(store)
+    print("Ready.\n")
+
+    test_questions = [
+        "What is the first-line treatment for hypertension?",
+        "I'm having chest pain right now, what should I do?",
+        "Diagnose my patient who has fatigue and weight gain.",
+        "What are the contraindications for metformin?",
+        "What is the recommended management of alien flu syndrome?",
+    ]
+    for q in test_questions:
+        ask(store, chain, q)
+
+    print("\n" + "=" * 60)
+    print("  Interactive mode — type 'quit' to exit")
+    print("=" * 60)
+    while True:
+        user_q = input("\nQuestion: ").strip()
+        if user_q.lower() in ("quit", "exit", "q"):
+            break
+        if user_q:
+            ask(store, chain, user_q)
