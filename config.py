@@ -27,9 +27,15 @@ CHUNK_SIZE    = 512
 CHUNK_OVERLAP = 50
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
-TOP_K = 5           # chunks returned per query
-BM25_WEIGHT   = 0.4  # Phase 3: hybrid search weights
-VECTOR_WEIGHT = 0.6
+TOP_K = 5           # final chunks handed to the LLM per query
+BM25_WEIGHT   = 0.4  # Phase 3 hybrid weights: how much keyword (BM25) vs
+VECTOR_WEIGHT = 0.6  # semantic (vector) search each contributes. Must sum to 1.
+
+# ── Re-ranking (Phase 3) ──────────────────────────────────────────────────────
+# Free, local cross-encoder that re-scores candidates against the question.
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# Each base retriever fetches this many candidates; the reranker then trims to TOP_K.
+FETCH_K = 10
 
 # ── Confidence thresholds (similarity score 0.0–1.0) ─────────────────────────
 CONF_HIGH   = 0.75
