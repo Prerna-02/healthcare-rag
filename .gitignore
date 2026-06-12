@@ -6,9 +6,16 @@ __pycache__/
 *.pyo
 .DS_Store
 
-# Data — never commit PDFs or vector store to git
-docs/
+# Data — never commit PDFs or vector store to git.
+# Ignore the *contents* of docs/ (not the folder itself) so we can re-include
+# one file: git cannot un-ignore a file whose parent directory is ignored.
+docs/*
 chroma_db/
+# ...but DO track the source metadata manifest (filenames + citation info, no PDF content)
+!docs/sources.json
+
+# Local editor / harness settings — never publish
+.claude/
 
 # Evaluation outputs
 eval/results/
