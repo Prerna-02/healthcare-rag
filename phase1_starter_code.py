@@ -1,15 +1,22 @@
 """
 Healthcare Knowledge Navigator — Phase 1
-Stack: LangChain · Ollama (llama3.1:8b, local) · HuggingFace Embeddings · ChromaDB
+Stack: LangChain · Ollama (qwen3:8b, local) · HuggingFace Embeddings · ChromaDB
 
 Prerequisites:
   1. conda env create -f environment.yml && conda activate healthcare-rag
-  2. ollama pull llama3.1:8b   (Ollama must be running: ollama serve)
+  2. ollama pull qwen3:8b   (Ollama must be running: ollama serve)
   3. Drop PDFs into ./docs/
   4. python phase1_starter_code.py
 """
 
 import re
+import sys
+
+# Windows consoles default to cp1252, which cannot encode the Unicode box-drawing
+# (─) and emoji (🟢🟡🔴) characters printed below — that raises UnicodeEncodeError.
+# Force UTF-8 so the script runs on any platform.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -132,7 +139,8 @@ def classify_query(query: str) -> tuple[str, str | None]:
 
 # ── Medical system prompt ─────────────────────────────────────────────────────
 
-_PROMPT = PromptTemplate.from_template("""You are a Healthcare Knowledge Assistant for medical professionals and students.
+_PROMPT = PromptTemplate.from_template("""/no_think
+You are a Healthcare Knowledge Assistant for medical professionals and students.
 Answer ONLY from the context below. If the answer is not in the context, say:
 "I don't have sufficient evidence in my knowledge base to answer this reliably."
 
@@ -147,16 +155,25 @@ Context:
 Question: {question}
 
 Answer (with citations):
-
----
-Disclaimer: For educational purposes only. Not a substitute for clinical judgment.
 """)
+
+# The disclaimer is appended in code (see ask()), NOT left to the LLM — that
+# guarantees it appears on every generated answer, as the ethics spec requires.
+_DISCLAIMER = (
+    "Disclaimer: This information is for educational purposes only and does not "
+    "constitute medical advice. Always consult a qualified healthcare "
+    "professional for clinical decisions."
+)
 
 
 # ── RAG chain ─────────────────────────────────────────────────────────────────
 
 def build_chain(store: Chroma):
-    llm       = ChatOllama(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE, think=False)
+    llm       = ChatOllama(
+        model=config.LLM_MODEL,
+        temperature=config.LLM_TEMPERATURE,
+        num_predict=config.LLM_NUM_PREDICT,
+    )
     retriever = store.as_retriever(search_kwargs={"k": config.TOP_K})
 
     chain = (
@@ -207,6 +224,7 @@ def ask(store: Chroma, chain, question: str):
 
     answer = chain.invoke(question)
     print(f"\n{answer}")
+    print(f"\n---\n{_DISCLAIMER}")
     print(f"\nSources:\n{format_citations(docs)}\n")
 
 

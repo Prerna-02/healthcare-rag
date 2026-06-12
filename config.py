@@ -8,10 +8,15 @@ EVAL_DIR    = Path("./eval")
 # ── LLM — Ollama (local, no API key needed) ───────────────────────────────────
 # Requires Ollama running: https://ollama.com
 # Pull model: ollama pull qwen3:8b
-# think=False disables Qwen3 reasoning tokens (<think>...</think>) which would
-# corrupt answer formatting and add 10-30s latency. Always set this for RAG.
+# Qwen3 has a "thinking mode" (<think>...</think> reasoning tokens). On this
+# stack (langchain-ollama 0.3.2 + Ollama) it is already OFF by default — verified
+# empirically. We additionally send Qwen3's '/no_think' switch in the prompt as
+# an explicit, portable safeguard. (Note: a ChatOllama(think=...) kwarg is
+# silently ignored on this version, so we do NOT rely on it.)
 LLM_MODEL        = "qwen3:8b"
-LLM_TEMPERATURE  = 0
+LLM_TEMPERATURE  = 0       # 0 = deterministic: same question -> same answer
+LLM_NUM_PREDICT  = 512     # max tokens generated per answer; caps CPU latency.
+                           # Raise if answers get cut off mid-sentence.
 
 # ── Embeddings — HuggingFace (free, CPU-optimised) ────────────────────────────
 # Downloads automatically on first run (~22 MB, ~30 seconds)
