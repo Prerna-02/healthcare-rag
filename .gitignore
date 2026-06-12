@@ -20,3 +20,7 @@ build/
 
 # Conda transient pip-requirements file (created during env create/update)
 condaenv.*.requirements.txt
+
+# Internal working docs — kept locally, not published to the public repo
+healthcare_rag_roadmap.md
+healthcare_rag_ethics_guardrails.md

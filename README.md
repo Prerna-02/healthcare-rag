@@ -36,7 +36,7 @@ PDFs / Guidelines / Papers
                                Phase 3: Hybrid (semantic + BM25) + CrossEncoder reranker
          │
          ▼
-   RAG Chain + Guardrails      LangChain · Ollama (llama3.1:8b, local)
+   RAG Chain + Guardrails      LangChain · Ollama (qwen3:8b, local)
    (system prompt · classifier · confidence scoring · citations)
          │
          ▼
@@ -72,9 +72,7 @@ healthcare-rag/
 │
 ├── environment.yml            # conda environment definition
 ├── .env.example               # API key template
-├── .gitignore
-├── healthcare_rag_roadmap.md
-└── healthcare_rag_ethics_guardrails.md
+└── .gitignore
 ```
 
 ---
@@ -100,7 +98,7 @@ conda activate healthcare-rag
 ### 2. Download the LLM
 
 ```bash
-ollama pull llama3.1:8b
+ollama pull qwen3:8b
 ```
 
 Ollama must be running in the background before you start the app (`ollama serve`).
@@ -109,7 +107,8 @@ Ollama must be running in the background before you start the app (`ollama serve
 
 | Your RAM | Model | Size | Notes |
 |----------|-------|------|-------|
-| 16 GB+ | `llama3.1:8b` ← recommended | 4.7 GB | Best quality for this use case |
+| 16 GB+ | `qwen3:8b` ← recommended | 5.2 GB | Strong reasoning; thinking mode disabled for clean RAG output |
+| 16 GB+ | `llama3.1:8b` | 4.7 GB | Solid alternative, no thinking mode to manage |
 | 8 GB | `mistral:7b` | 4.1 GB | Excellent at following complex system prompts |
 | 8 GB tight | `phi3:mini` | 2.3 GB | Fast, weaker reasoning |
 
@@ -200,7 +199,7 @@ The system enforces the following at the code level, not just in documentation.
 - Not a real-time emergency resource
 - Not a replacement for clinical judgment
 
-See `healthcare_rag_ethics_guardrails.md` for the full specification including regulatory context (FDA CDS guidance, HIPAA, GDPR), bias awareness, and the phase-by-phase ethics checklist.
+These guardrails are enforced in code — the query classifier, system prompt, and confidence scorer (`src/guardrails.py`, Phase 4) — not just described in documentation.
 
 ---
 
@@ -247,7 +246,7 @@ conda activate healthcare-rag
 ## Limitations
 
 - Answers are only as good as the indexed corpus — garbage in, garbage out
-- CPU inference with `llama3.1:8b` generates ~8–15 tokens/second (a full answer takes ~20–40 seconds)
+- CPU inference with `qwen3:8b` generates ~8–15 tokens/second (a full answer takes ~20–40 seconds)
 - The system cannot access the internet or fetch updated guidelines in real time
 - Medical literature contains known population biases (sex, race, age) — the system does not automatically correct for these
 - RAGAS evaluation requires a manually curated ground-truth dataset to be meaningful
