@@ -189,15 +189,22 @@ def build_chain(store: Chroma):
 # ── Citation formatter ────────────────────────────────────────────────────────
 
 def format_citations(docs: list) -> str:
+    # Uses the rich metadata added in Phase 2 (src/ingest.py) when present, and
+    # falls back gracefully to just the filename if the store was built without it.
     seen, lines = set(), []
     for i, doc in enumerate(docs, 1):
-        key = f"{doc.metadata.get('source_filename')}:{doc.metadata.get('page')}"
-        if key not in seen:
-            seen.add(key)
-            lines.append(
-                f"  [{i}] {doc.metadata.get('source_filename')} "
-                f"— page {doc.metadata.get('page', 0) + 1}"
-            )
+        m = doc.metadata
+        key = f"{m.get('source_filename')}:{m.get('page')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        title = m.get("source_title") or m.get("source_filename")
+        page = (m.get("page") or 0) + 1
+        date = m.get("publication_date", "")
+        datestr = f", {date}" if date and date != "unknown" else ""
+        stale = "  ⚠️ source >5yr old — verify against current guidelines" \
+            if m.get("is_current") is False else ""
+        lines.append(f"  [{i}] {title} — p.{page}{datestr}{stale}")
     return "\n".join(lines)
 
 
@@ -236,9 +243,13 @@ if __name__ == "__main__":
     print(f"  Model: {config.LLM_MODEL}  |  Embeddings: {config.EMBED_MODEL}")
     print("=" * 60 + "\n")
 
-    docs   = load_documents()
-    chunks = chunk_documents(docs)
-    store  = build_vectorstore(chunks)
+    # If a vector store already exists (e.g. built by `python -m src.ingest` in
+    # Phase 2), load it directly and skip re-reading every PDF. Only parse PDFs
+    # when there is nothing indexed yet.
+    if config.CHROMA_DIR.exists() and any(config.CHROMA_DIR.iterdir()):
+        store = build_vectorstore([])
+    else:
+        store = build_vectorstore(chunk_documents(load_documents()))
     chain  = build_chain(store)
     print("Ready.\n")
 

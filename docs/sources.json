@@ -1,0 +1,33 @@
+{
+  "__help__": {
+    "what_is_this": "Maps each PDF filename in docs/ to its citation metadata. Add one block per PDF you drop in. Keys starting with __ are ignored by the ingester.",
+    "fields": {
+      "source_title": "Human-readable title shown in citations",
+      "source_url": "Where the PDF came from (for traceability)",
+      "publication_date": "YYYY or YYYY-MM. Drives the >5-year staleness flag.",
+      "evidence_level": "one of: guideline | RCT | review | case_study | unknown",
+      "medical_specialty": "e.g. cardiology, endocrinology, infectious_disease"
+    }
+  },
+  "pd1.pdf": {
+    "source_title": "JNC7 — Seventh Report of the Joint National Committee on Prevention, Detection, Evaluation, and Treatment of High Blood Pressure (Complete Report)",
+    "source_url": "https://www.nhlbi.nih.gov/files/docs/guidelines/jnc7full.pdf",
+    "publication_date": "2004-08",
+    "evidence_level": "guideline",
+    "medical_specialty": "cardiology"
+  },
+  "pd2.pdf": {
+    "source_title": "Diagnosis and Management of Q Fever — United States, 2013 (CDC MMWR Recommendations and Reports, Vol. 62 / RR-3)",
+    "source_url": "https://www.cdc.gov/mmwr/preview/mmwrhtml/rr6203a1.htm",
+    "publication_date": "2013-03",
+    "evidence_level": "guideline",
+    "medical_specialty": "infectious_disease"
+  },
+  "WHO_1.pdf": {
+    "source_title": "WHO Mental Health Action Plan 2013-2020",
+    "source_url": "https://iris.who.int/bitstream/handle/10665/89966/9789241506021_eng.pdf",
+    "publication_date": "2013",
+    "evidence_level": "guideline",
+    "medical_specialty": "mental_health"
+  }
+}
