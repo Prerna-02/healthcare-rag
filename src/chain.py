@@ -59,9 +59,13 @@ def _relevance_scores(question: str, docs: list, encoder: HuggingFaceCrossEncode
 
 # ── Generation (Layer C, think=False) ─────────────────────────────────────────
 
-def generate(question: str, context: str) -> str:
+def generate(question: str, context: str) -> tuple[str, bool]:
     """Generate the grounded answer. think=False keeps Qwen3 from wasting its token
-    budget on hidden reasoning (verified in Phase 4 probing)."""
+    budget on hidden reasoning (verified in Phase 4 probing).
+
+    Returns (answer, truncated). `truncated` is True if generation stopped because
+    it hit the length cap (done_reason == 'length') rather than finishing naturally
+    — so a cut-off answer is never silently presented as complete."""
     resp = ollama.chat(
         model=config.LLM_MODEL,
         messages=[
@@ -72,7 +76,12 @@ def generate(question: str, context: str) -> str:
         think=False,
         options={"temperature": config.LLM_TEMPERATURE, "num_predict": config.LLM_NUM_PREDICT},
     )
-    return resp.message.content.strip()
+    return resp.message.content.strip(), resp.done_reason == "length"
+
+
+# When the model can't answer from context it emits this phrase (per SYSTEM_PROMPT).
+# We use it to suppress citations/warnings — there is no grounded answer to cite.
+_NO_ANSWER_MARKER = "sufficient evidence"
 
 
 # ── The assistant ─────────────────────────────────────────────────────────────
@@ -102,18 +111,27 @@ class Assistant:
 
         # Generate the grounded answer (Layer C).
         context = "\n\n".join(doc.page_content for doc in docs)
-        body = generate(question, context)
+        body, truncated = generate(question, context)
 
         # OUTPUT guardrails — annotate the answer.
         badge = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}[level]
         parts = [f"Confidence: {badge} {level}  (avg relevance {avg:.2f})", "", body]
 
-        conflict = guardrails.detect_conflicts(docs)
-        if conflict:
-            parts += ["", conflict]
-        for warning in guardrails.temporal_warnings(docs):
-            parts += ["", warning]
-        parts += ["", "Sources:", guardrails.format_citations(docs)]
+        if truncated:
+            parts += ["", "⚠️  This answer may be incomplete — it reached the length "
+                          "limit. Ask a more specific question, or raise LLM_NUM_PREDICT."]
+
+        # Only attach citations/conflict/staleness when there IS a grounded answer.
+        # For an "insufficient evidence" non-answer, listing sources would wrongly
+        # imply evidence exists.
+        if _NO_ANSWER_MARKER not in body.lower():
+            conflict = guardrails.detect_conflicts(docs)
+            if conflict:
+                parts += ["", conflict]
+            for warning in guardrails.temporal_warnings(docs):
+                parts += ["", warning]
+            parts += ["", "Sources:", guardrails.format_citations(docs)]
+
         parts += ["", "—" * 3, config.DISCLAIMER]
         return "\n".join(parts)
 

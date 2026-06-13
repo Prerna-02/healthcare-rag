@@ -15,8 +15,10 @@ EVAL_DIR    = Path("./eval")
 # silently ignored on this version, so we do NOT rely on it.)
 LLM_MODEL        = "qwen3:8b"
 LLM_TEMPERATURE  = 0       # 0 = deterministic: same question -> same answer
-LLM_NUM_PREDICT  = 512     # max tokens generated per answer; caps CPU latency.
-                           # Raise if answers get cut off mid-sentence.
+LLM_NUM_PREDICT  = 1024    # MAX tokens per answer (not forced — the model stops
+                           # naturally when done). Generous so real answers finish;
+                           # if one ever hits this cap, the chain flags it as
+                           # possibly-incomplete rather than showing a silent half.
 
 # ── Embeddings — HuggingFace (free, CPU-optimised) ────────────────────────────
 # Downloads automatically on first run (~22 MB, ~30 seconds)
