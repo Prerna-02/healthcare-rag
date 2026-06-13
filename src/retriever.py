@@ -72,24 +72,27 @@ def hybrid_retriever(store: Chroma, chunks: list) -> EnsembleRetriever:
     )
 
 
-def with_reranker(base_retriever):
+def with_reranker(base_retriever, encoder: HuggingFaceCrossEncoder | None = None):
     """Wrap any retriever so its candidates are re-scored by a cross-encoder.
 
     A cross-encoder reads (question, chunk) TOGETHER and outputs a precise
     relevance score — far more accurate than the first-pass similarity, but too
     slow to run on the whole corpus. So we only run it on the handful of
-    candidates the base retriever already shortlisted, then keep the top TOP_K."""
-    encoder = HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
+    candidates the base retriever already shortlisted, then keep the top TOP_K.
+
+    Pass an existing `encoder` to reuse one model (Phase 4 also uses it to compute
+    answer confidence) instead of loading the ~80 MB model twice."""
+    encoder = encoder or HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
     reranker = CrossEncoderReranker(model=encoder, top_n=config.TOP_K)
     return ContextualCompressionRetriever(
         base_compressor=reranker, base_retriever=base_retriever
     )
 
 
-def get_retriever(store: Chroma, chunks: list):
+def get_retriever(store: Chroma, chunks: list, encoder: HuggingFaceCrossEncoder | None = None):
     """The production retriever for later phases: hybrid candidates, then reranked.
     Fast-and-broad first pass (hybrid) → slow-and-precise final pass (reranker)."""
-    return with_reranker(hybrid_retriever(store, chunks))
+    return with_reranker(hybrid_retriever(store, chunks), encoder=encoder)
 
 
 # ── Comparison demo ───────────────────────────────────────────────────────────

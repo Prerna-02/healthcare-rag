@@ -15,8 +15,10 @@ EVAL_DIR    = Path("./eval")
 # silently ignored on this version, so we do NOT rely on it.)
 LLM_MODEL        = "qwen3:8b"
 LLM_TEMPERATURE  = 0       # 0 = deterministic: same question -> same answer
-LLM_NUM_PREDICT  = 512     # max tokens generated per answer; caps CPU latency.
-                           # Raise if answers get cut off mid-sentence.
+LLM_NUM_PREDICT  = 1024    # MAX tokens per answer (not forced — the model stops
+                           # naturally when done). Generous so real answers finish;
+                           # if one ever hits this cap, the chain flags it as
+                           # possibly-incomplete rather than showing a silent half.
 
 # ── Embeddings — HuggingFace (free, CPU-optimised) ────────────────────────────
 # Downloads automatically on first run (~22 MB, ~30 seconds)
@@ -43,3 +45,33 @@ CONF_MEDIUM = 0.50
 
 # ── Source freshness ──────────────────────────────────────────────────────────
 MAX_SOURCE_AGE_YEARS = 5  # warn if source is older than this
+
+# ── Guardrails (Phase 4) ──────────────────────────────────────────────────────
+# The intent classifier only needs to emit a one-word category, so a tiny budget.
+CLASSIFIER_NUM_PREDICT = 16
+
+# Refusal categories -> the exact message shown. Edit policy HERE — never bury it
+# in code. The classifier returns one of these keys (or "general", which is allowed).
+REFUSAL_MESSAGES = {
+    "emergency": (
+        "⚠️  This sounds like a medical emergency. Please call your local emergency "
+        "number (e.g. 911 / 999 / 112) immediately. This system cannot provide "
+        "emergency medical guidance."
+    ),
+    "diagnosis": (
+        "🚫 This system offers general, educational information only — it cannot "
+        "diagnose a specific person or interpret an individual's symptoms. Please "
+        "consult a qualified healthcare professional."
+    ),
+    "prescribing": (
+        "🚫 This system cannot recommend a medication or dose for an individual "
+        "patient. Prescribing decisions must be made by a qualified clinician."
+    ),
+}
+
+# Stamped on every generated answer (refusals are themselves safe, so they skip it).
+DISCLAIMER = (
+    "Disclaimer: This information is for educational purposes only and does not "
+    "constitute medical advice. Always consult a qualified healthcare professional "
+    "for clinical decisions."
+)
