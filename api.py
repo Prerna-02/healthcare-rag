@@ -23,8 +23,14 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Healthcare Knowledge Navigator API", version="1.0", lifespan=lifespan)
 
 
+class Turn(BaseModel):
+    role: str       # "user" or "assistant"
+    content: str
+
+
 class QueryRequest(BaseModel):
     question: str
+    history: list[Turn] = []   # recent turns, so follow-ups can be resolved
 
 
 @app.get("/health")
@@ -42,4 +48,5 @@ def query(req: QueryRequest):
                 "confidence_level": None, "confidence_score": None, "citations": [],
                 "temporal_warnings": [], "conflict": None, "truncated": False,
                 "disclaimer": None}
-    return _state["assistant"].answer_structured(question)
+    history = [{"role": t.role, "content": t.content} for t in req.history]
+    return _state["assistant"].answer_structured(question, history=history)

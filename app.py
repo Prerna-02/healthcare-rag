@@ -23,10 +23,26 @@ BADGE = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
 st.set_page_config(page_title="Healthcare Knowledge Navigator", page_icon="⚕️")
 
 
-def call_api(question: str) -> dict | None:
-    """POST the question to the backend; return the JSON, or None if unreachable."""
+def recent_history(messages: list, max_msgs: int = 4) -> list:
+    """Build a compact {role, content} history from the last few turns, so the
+    backend can resolve a follow-up like 'explain this' into a standalone question."""
+    hist = []
+    for m in messages[-max_msgs:]:
+        if m["role"] == "user":
+            hist.append({"role": "user", "content": m["content"]})
+        else:
+            answer = (m.get("data") or {}).get("answer")
+            if answer:
+                hist.append({"role": "assistant", "content": answer})
+    return hist
+
+
+def call_api(question: str, history: list | None = None) -> dict | None:
+    """POST the question (+ recent history) to the backend; return JSON or None."""
     try:
-        resp = requests.post(f"{API_URL}/query", json={"question": question}, timeout=300)
+        resp = requests.post(f"{API_URL}/query",
+                             json={"question": question, "history": history or []},
+                             timeout=300)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException:
@@ -42,6 +58,9 @@ def render_answer(data: dict | None) -> None:
     if data.get("blocked"):
         st.error(data["answer"])          # refusal (emergency / diagnosis / prescribing)
         return
+
+    if data.get("resolved_question"):
+        st.caption(f"_Interpreted your follow-up as: “{data['resolved_question']}”_")
 
     level = data.get("confidence_level")
     if level:
@@ -78,19 +97,13 @@ st.title("⚕️ Healthcare Knowledge Navigator")
 st.warning(DISCLAIMER_BANNER)   # re-rendered every run -> a persistent banner
 
 with st.sidebar:
-    st.header("About")
-    st.markdown(
-        "Evidence-based answers from indexed clinical guidelines, with citations, "
-        "confidence scoring, and built-in safety guardrails.\n\n"
-        "**Try:**\n"
-        "- What are the contraindications listed for anticoagulation in AFib?\n"
-        "- How is Q fever transmitted?\n"
-        "- WHO mental health action plan objectives?\n\n"
-        "Emergency / diagnosis / prescribing questions are refused by design."
-    )
+    # Backend connection status only (no instructions).
     try:
         ok = requests.get(f"{API_URL}/health", timeout=5).json().get("assistant_loaded")
-        st.success("Backend: connected ✅") if ok else st.warning("Backend: starting…")
+        if ok:
+            st.success("Backend: connected ✅")
+        else:
+            st.warning("Backend: starting…")
     except requests.exceptions.RequestException:
         st.error("Backend: offline ❌")
 
@@ -100,15 +113,19 @@ if "messages" not in st.session_state:
 # Replay conversation history.
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"]) if msg["role"] == "user" else render_answer(msg["data"])
+        if msg["role"] == "user":
+            st.markdown(msg["content"])
+        else:
+            render_answer(msg["data"])
 
 # Handle new input.
 if prompt := st.chat_input("Ask a medical question…"):
+    history = recent_history(st.session_state.messages)   # before appending current turn
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.spinner("Searching guidelines and generating a grounded answer…"):
-            data = call_api(prompt)
+            data = call_api(prompt, history)
         render_answer(data)
     st.session_state.messages.append({"role": "assistant", "data": data})

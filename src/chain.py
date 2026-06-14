@@ -83,6 +83,32 @@ def generate(question: str, context: str) -> tuple[str, bool]:
 # We use it to suppress citations/warnings — there is no grounded answer to cite.
 _NO_ANSWER_MARKER = "sufficient evidence"
 
+_CONTEXTUALIZE_PROMPT = """Given the conversation so far, rewrite the user's follow-up into a SELF-CONTAINED question that makes sense on its own (resolve pronouns like "this/it/that" using the history). If it is already self-contained, return it unchanged. Output ONLY the rewritten question, nothing else.
+
+Conversation so far:
+{history}
+
+Follow-up: {question}
+Self-contained question:"""
+
+
+def contextualize(question: str, history: list[dict] | None) -> str:
+    """Turn a follow-up ('explain this in detail') into a standalone question using
+    recent turns, so retrieval has real terms to match. Returns the original if
+    there's no history. One cheap think=False call."""
+    if not history:
+        return question
+    hist = "\n".join(f"{h['role']}: {h['content']}" for h in history)
+    resp = ollama.chat(
+        model=config.LLM_MODEL,
+        messages=[{"role": "user",
+                   "content": _CONTEXTUALIZE_PROMPT.format(history=hist, question=question)}],
+        think=False,
+        options={"temperature": 0, "num_predict": 80},
+    )
+    rewritten = resp.message.content.strip()
+    return rewritten or question
+
 
 # ── The assistant ─────────────────────────────────────────────────────────────
 
@@ -98,11 +124,17 @@ class Assistant:
         self.encoder = HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
         self.retriever = R.get_retriever(self.store, self.chunks, encoder=self.encoder)
 
-    def answer_structured(self, question: str) -> dict:
+    def answer_structured(self, question: str, history: list[dict] | None = None) -> dict:
         """The single source of truth. Returns the answer + all guardrail outputs
-        as plain data — the API serialises this to JSON; the CLI formats it to text."""
+        as plain data — the API serialises this to JSON; the CLI formats it to text.
+        `history` (recent turns) lets a follow-up be rewritten into a standalone query."""
+        # Resolve follow-ups ('explain this') into a standalone question first, then
+        # run everything (guardrails, retrieval, generation) on the resolved intent.
+        resolved = contextualize(question, history)
+        rewritten = resolved if resolved != question else None
+
         # INPUT guardrails (Layer A + B) — refuse before spending any retrieval/LLM.
-        category = guardrails.classify_query(question)
+        category = guardrails.classify_query(resolved)
         if guardrails.is_blocked(category):
             return {
                 "blocked": True,
@@ -115,16 +147,17 @@ class Assistant:
                 "conflict": None,
                 "truncated": False,
                 "disclaimer": None,  # a refusal is itself safe; no disclaimer needed
+                "resolved_question": rewritten,
             }
 
         # Retrieve (Phase 3 hybrid + rerank) and score confidence from real relevance.
-        docs = self.retriever.invoke(question)
-        scores = _relevance_scores(question, docs, self.encoder)
+        docs = self.retriever.invoke(resolved)
+        scores = _relevance_scores(resolved, docs, self.encoder)
         level, avg = guardrails.compute_confidence(scores)
 
-        # Generate the grounded answer (Layer C).
+        # Generate the grounded answer (Layer C) on the resolved question.
         context = "\n\n".join(doc.page_content for doc in docs)
-        body, truncated = generate(question, context)
+        body, truncated = generate(resolved, context)
 
         # Output guardrails apply only when there IS a grounded answer — for an
         # "insufficient evidence" non-answer, citing sources would mislead.
@@ -140,6 +173,7 @@ class Assistant:
             "conflict": guardrails.detect_conflicts(docs) if grounded else None,
             "truncated": truncated,
             "disclaimer": config.DISCLAIMER,
+            "resolved_question": rewritten,
         }
 
     def answer(self, question: str) -> str:
