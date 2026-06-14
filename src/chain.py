@@ -98,11 +98,24 @@ class Assistant:
         self.encoder = HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
         self.retriever = R.get_retriever(self.store, self.chunks, encoder=self.encoder)
 
-    def answer(self, question: str) -> str:
+    def answer_structured(self, question: str) -> dict:
+        """The single source of truth. Returns the answer + all guardrail outputs
+        as plain data — the API serialises this to JSON; the CLI formats it to text."""
         # INPUT guardrails (Layer A + B) — refuse before spending any retrieval/LLM.
         category = guardrails.classify_query(question)
         if guardrails.is_blocked(category):
-            return f"🚫 {guardrails.refusal_message(category)}"
+            return {
+                "blocked": True,
+                "category": category,
+                "answer": guardrails.refusal_message(category),
+                "confidence_level": None,
+                "confidence_score": None,
+                "citations": [],
+                "temporal_warnings": [],
+                "conflict": None,
+                "truncated": False,
+                "disclaimer": None,  # a refusal is itself safe; no disclaimer needed
+            }
 
         # Retrieve (Phase 3 hybrid + rerank) and score confidence from real relevance.
         docs = self.retriever.invoke(question)
@@ -113,26 +126,45 @@ class Assistant:
         context = "\n\n".join(doc.page_content for doc in docs)
         body, truncated = generate(question, context)
 
-        # OUTPUT guardrails — annotate the answer.
-        badge = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}[level]
-        parts = [f"Confidence: {badge} {level}  (avg relevance {avg:.2f})", "", body]
+        # Output guardrails apply only when there IS a grounded answer — for an
+        # "insufficient evidence" non-answer, citing sources would mislead.
+        grounded = _NO_ANSWER_MARKER not in body.lower()
+        return {
+            "blocked": False,
+            "category": category,
+            "answer": body,
+            "confidence_level": level,
+            "confidence_score": round(avg, 3),
+            "citations": guardrails.citation_list(docs) if grounded else [],
+            "temporal_warnings": guardrails.temporal_warnings(docs) if grounded else [],
+            "conflict": guardrails.detect_conflicts(docs) if grounded else None,
+            "truncated": truncated,
+            "disclaimer": config.DISCLAIMER,
+        }
 
-        if truncated:
+    def answer(self, question: str) -> str:
+        """Plain-text rendering of answer_structured() for the CLI."""
+        r = self.answer_structured(question)
+        if r["blocked"]:
+            return f"🚫 {r['answer']}"
+
+        badge = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}[r["confidence_level"]]
+        parts = [f"Confidence: {badge} {r['confidence_level']}  "
+                 f"(avg relevance {r['confidence_score']:.2f})", "", r["answer"]]
+        if r["truncated"]:
             parts += ["", "⚠️  This answer may be incomplete — it reached the length "
                           "limit. Ask a more specific question, or raise LLM_NUM_PREDICT."]
-
-        # Only attach citations/conflict/staleness when there IS a grounded answer.
-        # For an "insufficient evidence" non-answer, listing sources would wrongly
-        # imply evidence exists.
-        if _NO_ANSWER_MARKER not in body.lower():
-            conflict = guardrails.detect_conflicts(docs)
-            if conflict:
-                parts += ["", conflict]
-            for warning in guardrails.temporal_warnings(docs):
+        if r["citations"]:
+            if r["conflict"]:
+                parts += ["", r["conflict"]]
+            for warning in r["temporal_warnings"]:
                 parts += ["", warning]
-            parts += ["", "Sources:", guardrails.format_citations(docs)]
-
-        parts += ["", "—" * 3, config.DISCLAIMER]
+            lines = [f"  [{c['index']}] {c['title']} — p.{c['page']}"
+                     + (f", {c['date']}" if c["date"] else "")
+                     + ("  ⚠️ >5yr" if not c["is_current"] else "")
+                     for c in r["citations"]]
+            parts += ["", "Sources:", "\n".join(lines)]
+        parts += ["", "—" * 3, r["disclaimer"]]
         return "\n".join(parts)
 
 

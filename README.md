@@ -55,13 +55,14 @@ PDFs / Guidelines / Papers
 healthcare-rag/
 ├── config.py                  # all settings in one place (models, paths, thresholds)
 ├── phase1_starter_code.py     # Phase 1 entry point — run this first
-├── app.py                     # Phase 6 — Streamlit UI
+├── api.py                     # Phase 6 — FastAPI backend (POST /query -> JSON)
+├── app.py                     # Phase 6 — Streamlit frontend (calls the API)
 │
 ├── src/
 │   ├── ingest.py              # Phase 2: multi-doc loader, chunker, embedder
 │   ├── retriever.py           # Phase 3: hybrid search + re-ranker
-│   ├── chain.py               # Phase 4: full RAG chain (refactored from Phase 1)
-│   └── guardrails.py          # Phase 4: query classifier, confidence scorer
+│   ├── chain.py               # Phase 4: guarded RAG pipeline (Assistant)
+│   └── guardrails.py          # Phase 4: query classifier, confidence, citations
 │
 ├── eval/
 │   ├── dataset.json           # ground truth Q&A pairs (build in Phase 5)
@@ -147,11 +148,23 @@ python phase1_starter_code.py
 
 The script runs five built-in test queries (including emergency and refusal cases), then drops into interactive mode. Type `quit` to exit.
 
-### Phase 6 — Streamlit app (coming)
+### Phase 6 — Web app (FastAPI backend + Streamlit frontend)
+
+The UI is split into a JSON API and a thin client. Run each in its own terminal
+(both inside the `healthcare-rag` conda env, with Ollama running):
 
 ```bash
-streamlit run app.py
+# Terminal 1 — backend (loads the models once; ~1 min to start)
+uvicorn api:app --port 8000          # API docs at http://localhost:8000/docs
+
+# Terminal 2 — frontend
+streamlit run app.py                 # opens http://localhost:8501
 ```
+
+The Streamlit app POSTs each question to the API's `POST /query` and renders the
+JSON response: the answer, a confidence badge, citation cards (with source
+snippets), staleness warnings, and the persistent disclaimer banner. Build the
+vector store first with `python -m src.ingest` if you haven't already.
 
 ---
 
