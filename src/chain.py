@@ -19,10 +19,15 @@ Run the interactive assistant:
     python -m src.chain
 """
 import math
+import os
 import sys
+import tempfile
 
 import ollama
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_community.document_loaders import PyPDFLoader
 
 import config
 from src import guardrails
@@ -117,6 +122,7 @@ class Assistant:
     without re-loading anything."""
 
     def __init__(self):
+        self.embeddings = R._embeddings()           # reused for session uploads too
         self.store = R.load_store()
         print("  Loading corpus text for BM25...")
         self.chunks = R.load_and_chunk()
@@ -124,10 +130,48 @@ class Assistant:
         self.encoder = HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
         self.retriever = R.get_retriever(self.store, self.chunks, encoder=self.encoder)
 
-    def answer_structured(self, question: str, history: list[dict] | None = None) -> dict:
+    def build_session_retriever(self, pdf_bytes: bytes, filename: str):
+        """Ingest an UPLOADED PDF into an in-memory vector store (never persisted to
+        disk, never mixed into the curated corpus) and return a hybrid+rerank
+        retriever over just that document, plus its chunk count.
+
+        Steps: write bytes to a temp file -> PyPDFLoader reads it -> split into
+        chunks -> tag as an uploaded source -> embed into an EPHEMERAL Chroma
+        (no persist_directory = in-memory) -> wrap in the Phase-3 retriever."""
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        try:
+            pages = PyPDFLoader(tmp_path).load()
+        finally:
+            os.unlink(tmp_path)                     # temp file removed immediately
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""])
+        chunks = splitter.split_documents(pages)
+        for chunk in chunks:
+            chunk.metadata.update({
+                "source_filename": filename,
+                "source_title": f"(uploaded) {filename}",
+                "source_url": "",
+                "publication_date": "unknown",
+                "evidence_level": "user_upload",
+                "medical_specialty": "uploaded",
+                "is_current": True,            # unknown date -> don't flag as stale
+            })
+        # No persist_directory -> ChromaDB keeps this in memory only.
+        store = Chroma.from_documents(chunks, self.embeddings)
+        retriever = R.get_retriever(store, chunks, encoder=self.encoder)
+        return retriever, len(chunks)
+
+    def answer_structured(self, question: str, history: list[dict] | None = None,
+                          retriever=None) -> dict:
         """The single source of truth. Returns the answer + all guardrail outputs
         as plain data — the API serialises this to JSON; the CLI formats it to text.
-        `history` (recent turns) lets a follow-up be rewritten into a standalone query."""
+        `history` (recent turns) lets a follow-up be rewritten into a standalone query.
+        `retriever` overrides the default corpus retriever (e.g. a session/upload one)."""
+        retriever = retriever or self.retriever
         # Resolve follow-ups ('explain this') into a standalone question first, then
         # run everything (guardrails, retrieval, generation) on the resolved intent.
         resolved = contextualize(question, history)
@@ -151,7 +195,7 @@ class Assistant:
             }
 
         # Retrieve (Phase 3 hybrid + rerank) and score confidence from real relevance.
-        docs = self.retriever.invoke(resolved)
+        docs = retriever.invoke(resolved)
         scores = _relevance_scores(resolved, docs, self.encoder)
         level, avg = guardrails.compute_confidence(scores)
 

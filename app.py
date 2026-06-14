@@ -37,11 +37,14 @@ def recent_history(messages: list, max_msgs: int = 4) -> list:
     return hist
 
 
-def call_api(question: str, history: list | None = None) -> dict | None:
-    """POST the question (+ recent history) to the backend; return JSON or None."""
+def call_api(question: str, history: list | None = None,
+             session_id: str | None = None) -> dict | None:
+    """POST the question (+ recent history, + optional uploaded-doc session) to the
+    backend; return JSON or None if unreachable."""
     try:
         resp = requests.post(f"{API_URL}/query",
-                             json={"question": question, "history": history or []},
+                             json={"question": question, "history": history or [],
+                                   "session_id": session_id},
                              timeout=300)
         resp.raise_for_status()
         return resp.json()
@@ -97,7 +100,7 @@ st.title("⚕️ Healthcare Knowledge Navigator")
 st.warning(DISCLAIMER_BANNER)   # re-rendered every run -> a persistent banner
 
 with st.sidebar:
-    # Backend connection status only (no instructions).
+    # Backend connection status.
     try:
         ok = requests.get(f"{API_URL}/health", timeout=5).json().get("assistant_loaded")
         if ok:
@@ -106,6 +109,34 @@ with st.sidebar:
             st.warning("Backend: starting…")
     except requests.exceptions.RequestException:
         st.error("Backend: offline ❌")
+
+    st.divider()
+    st.subheader("Your document")
+    st.caption("⚠️ Educational PDFs only — **do not upload patient data / PHI.** "
+               "Files are processed in memory for this session only and are never stored.")
+    upload = st.file_uploader("Upload a PDF", type="pdf")
+    if upload is not None and st.session_state.get("uploaded_name") != upload.name:
+        with st.spinner(f"Indexing “{upload.name}”…"):
+            try:
+                resp = requests.post(
+                    f"{API_URL}/upload",
+                    files={"file": (upload.name, upload.getvalue(), "application/pdf")},
+                    timeout=300)
+                resp.raise_for_status()
+                info = resp.json()
+                st.session_state.session_id = info["session_id"]
+                st.session_state.uploaded_name = upload.name
+                st.success(f"Indexed ({info['n_chunks']} chunks)")
+            except requests.exceptions.RequestException as exc:
+                st.error(f"Upload failed: {exc}")
+
+    # Source toggle — only offer the uploaded doc once one exists.
+    if st.session_state.get("session_id"):
+        st.session_state.source = st.radio(
+            "Answer from:",
+            ["Guideline corpus", f"Uploaded: {st.session_state.uploaded_name}"])
+    else:
+        st.session_state.source = "Guideline corpus"
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -121,11 +152,14 @@ for msg in st.session_state.messages:
 # Handle new input.
 if prompt := st.chat_input("Ask a medical question…"):
     history = recent_history(st.session_state.messages)   # before appending current turn
+    # Route to the uploaded doc only when that source is selected.
+    use_upload = st.session_state.get("source", "").startswith("Uploaded")
+    session_id = st.session_state.get("session_id") if use_upload else None
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     with st.chat_message("assistant"):
-        with st.spinner("Searching guidelines and generating a grounded answer…"):
-            data = call_api(prompt, history)
+        with st.spinner("Searching and generating a grounded answer…"):
+            data = call_api(prompt, history, session_id)
         render_answer(data)
     st.session_state.messages.append({"role": "assistant", "data": data})
