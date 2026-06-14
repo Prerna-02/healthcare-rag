@@ -12,7 +12,7 @@ OUTPUT guardrails (run AFTER generation, to annotate the answer):
   - compute_confidence()  : HIGH/MEDIUM/LOW from real cross-encoder relevance.
   - temporal_warnings()   : flags any cited source older than MAX_SOURCE_AGE_YEARS.
   - detect_conflicts()    : notes when the answer rests on multiple sources.
-  - format_citations()    : Title · date · page, with a staleness marker.
+  - citation_list()       : structured citations (title, page, date, staleness, snippet).
 
 All policy (refusal messages, the disclaimer, thresholds) lives in config.py, not
 in this logic — so it's a readable, editable rulebook, not buried magic.
@@ -155,19 +155,25 @@ def detect_conflicts(docs: list) -> str | None:
     return None
 
 
-def format_citations(docs: list) -> str:
-    """De-duplicated source list: Title — p.N, date, with a staleness marker."""
-    seen, lines = set(), []
-    for i, doc in enumerate(docs, 1):
+def citation_list(docs: list) -> list[dict]:
+    """De-duplicated, STRUCTURED citations (one per unique source+page). Used by
+    both the API (serialised to JSON) and the CLI (rendered to text). Includes a
+    short snippet so a UI can offer a 'view source' expander."""
+    seen, out = set(), []
+    for doc in docs:
         meta = doc.metadata
         key = f"{meta.get('source_filename')}:{meta.get('page')}"
         if key in seen:
             continue
         seen.add(key)
-        title = meta.get("source_title") or meta.get("source_filename")
-        page = (meta.get("page") or 0) + 1
         date = meta.get("publication_date", "")
-        datestr = f", {date}" if date and date != "unknown" else ""
-        stale = "  ⚠️ >5yr" if meta.get("is_current") is False else ""
-        lines.append(f"  [{i}] {title} — p.{page}{datestr}{stale}")
-    return "\n".join(lines)
+        out.append({
+            "index": len(out) + 1,
+            "title": meta.get("source_title") or meta.get("source_filename"),
+            "page": (meta.get("page") or 0) + 1,
+            "date": "" if date == "unknown" else date,
+            "source_url": meta.get("source_url", ""),
+            "is_current": meta.get("is_current") is not False,
+            "snippet": " ".join(doc.page_content.split())[:300],
+        })
+    return out

@@ -19,10 +19,15 @@ Run the interactive assistant:
     python -m src.chain
 """
 import math
+import os
 import sys
+import tempfile
 
 import ollama
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_community.document_loaders import PyPDFLoader
 
 import config
 from src import guardrails
@@ -83,6 +88,32 @@ def generate(question: str, context: str) -> tuple[str, bool]:
 # We use it to suppress citations/warnings — there is no grounded answer to cite.
 _NO_ANSWER_MARKER = "sufficient evidence"
 
+_CONTEXTUALIZE_PROMPT = """Given the conversation so far, rewrite the user's follow-up into a SELF-CONTAINED question that makes sense on its own (resolve pronouns like "this/it/that" using the history). If it is already self-contained, return it unchanged. Output ONLY the rewritten question, nothing else.
+
+Conversation so far:
+{history}
+
+Follow-up: {question}
+Self-contained question:"""
+
+
+def contextualize(question: str, history: list[dict] | None) -> str:
+    """Turn a follow-up ('explain this in detail') into a standalone question using
+    recent turns, so retrieval has real terms to match. Returns the original if
+    there's no history. One cheap think=False call."""
+    if not history:
+        return question
+    hist = "\n".join(f"{h['role']}: {h['content']}" for h in history)
+    resp = ollama.chat(
+        model=config.LLM_MODEL,
+        messages=[{"role": "user",
+                   "content": _CONTEXTUALIZE_PROMPT.format(history=hist, question=question)}],
+        think=False,
+        options={"temperature": 0, "num_predict": 80},
+    )
+    rewritten = resp.message.content.strip()
+    return rewritten or question
+
 
 # ── The assistant ─────────────────────────────────────────────────────────────
 
@@ -91,6 +122,7 @@ class Assistant:
     without re-loading anything."""
 
     def __init__(self):
+        self.embeddings = R._embeddings()           # reused for session uploads too
         self.store = R.load_store()
         print("  Loading corpus text for BM25...")
         self.chunks = R.load_and_chunk()
@@ -98,41 +130,119 @@ class Assistant:
         self.encoder = HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
         self.retriever = R.get_retriever(self.store, self.chunks, encoder=self.encoder)
 
-    def answer(self, question: str) -> str:
+    def build_session_retriever(self, pdf_bytes: bytes, filename: str):
+        """Ingest an UPLOADED PDF into an in-memory vector store (never persisted to
+        disk, never mixed into the curated corpus) and return a hybrid+rerank
+        retriever over just that document, plus its chunk count.
+
+        Steps: write bytes to a temp file -> PyPDFLoader reads it -> split into
+        chunks -> tag as an uploaded source -> embed into an EPHEMERAL Chroma
+        (no persist_directory = in-memory) -> wrap in the Phase-3 retriever."""
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        try:
+            pages = PyPDFLoader(tmp_path).load()
+        finally:
+            os.unlink(tmp_path)                     # temp file removed immediately
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""])
+        chunks = splitter.split_documents(pages)
+        for chunk in chunks:
+            chunk.metadata.update({
+                "source_filename": filename,
+                "source_title": f"(uploaded) {filename}",
+                "source_url": "",
+                "publication_date": "unknown",
+                "evidence_level": "user_upload",
+                "medical_specialty": "uploaded",
+                "is_current": True,            # unknown date -> don't flag as stale
+            })
+        # No persist_directory -> ChromaDB keeps this in memory only.
+        store = Chroma.from_documents(chunks, self.embeddings)
+        retriever = R.get_retriever(store, chunks, encoder=self.encoder)
+        return retriever, len(chunks)
+
+    def answer_structured(self, question: str, history: list[dict] | None = None,
+                          retriever=None) -> dict:
+        """The single source of truth. Returns the answer + all guardrail outputs
+        as plain data — the API serialises this to JSON; the CLI formats it to text.
+        `history` (recent turns) lets a follow-up be rewritten into a standalone query.
+        `retriever` overrides the default corpus retriever (e.g. a session/upload one)."""
+        retriever = retriever or self.retriever
+        # Resolve follow-ups ('explain this') into a standalone question first, then
+        # run everything (guardrails, retrieval, generation) on the resolved intent.
+        resolved = contextualize(question, history)
+        rewritten = resolved if resolved != question else None
+
         # INPUT guardrails (Layer A + B) — refuse before spending any retrieval/LLM.
-        category = guardrails.classify_query(question)
+        category = guardrails.classify_query(resolved)
         if guardrails.is_blocked(category):
-            return f"🚫 {guardrails.refusal_message(category)}"
+            return {
+                "blocked": True,
+                "category": category,
+                "answer": guardrails.refusal_message(category),
+                "confidence_level": None,
+                "confidence_score": None,
+                "citations": [],
+                "temporal_warnings": [],
+                "conflict": None,
+                "truncated": False,
+                "disclaimer": None,  # a refusal is itself safe; no disclaimer needed
+                "resolved_question": rewritten,
+            }
 
         # Retrieve (Phase 3 hybrid + rerank) and score confidence from real relevance.
-        docs = self.retriever.invoke(question)
-        scores = _relevance_scores(question, docs, self.encoder)
+        docs = retriever.invoke(resolved)
+        scores = _relevance_scores(resolved, docs, self.encoder)
         level, avg = guardrails.compute_confidence(scores)
 
-        # Generate the grounded answer (Layer C).
+        # Generate the grounded answer (Layer C) on the resolved question.
         context = "\n\n".join(doc.page_content for doc in docs)
-        body, truncated = generate(question, context)
+        body, truncated = generate(resolved, context)
 
-        # OUTPUT guardrails — annotate the answer.
-        badge = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}[level]
-        parts = [f"Confidence: {badge} {level}  (avg relevance {avg:.2f})", "", body]
+        # Output guardrails apply only when there IS a grounded answer — for an
+        # "insufficient evidence" non-answer, citing sources would mislead.
+        grounded = _NO_ANSWER_MARKER not in body.lower()
+        return {
+            "blocked": False,
+            "category": category,
+            "answer": body,
+            "confidence_level": level,
+            "confidence_score": round(avg, 3),
+            "citations": guardrails.citation_list(docs) if grounded else [],
+            "temporal_warnings": guardrails.temporal_warnings(docs) if grounded else [],
+            "conflict": guardrails.detect_conflicts(docs) if grounded else None,
+            "truncated": truncated,
+            "disclaimer": config.DISCLAIMER,
+            "resolved_question": rewritten,
+        }
 
-        if truncated:
+    def answer(self, question: str) -> str:
+        """Plain-text rendering of answer_structured() for the CLI."""
+        r = self.answer_structured(question)
+        if r["blocked"]:
+            return f"🚫 {r['answer']}"
+
+        badge = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}[r["confidence_level"]]
+        parts = [f"Confidence: {badge} {r['confidence_level']}  "
+                 f"(avg relevance {r['confidence_score']:.2f})", "", r["answer"]]
+        if r["truncated"]:
             parts += ["", "⚠️  This answer may be incomplete — it reached the length "
                           "limit. Ask a more specific question, or raise LLM_NUM_PREDICT."]
-
-        # Only attach citations/conflict/staleness when there IS a grounded answer.
-        # For an "insufficient evidence" non-answer, listing sources would wrongly
-        # imply evidence exists.
-        if _NO_ANSWER_MARKER not in body.lower():
-            conflict = guardrails.detect_conflicts(docs)
-            if conflict:
-                parts += ["", conflict]
-            for warning in guardrails.temporal_warnings(docs):
+        if r["citations"]:
+            if r["conflict"]:
+                parts += ["", r["conflict"]]
+            for warning in r["temporal_warnings"]:
                 parts += ["", warning]
-            parts += ["", "Sources:", guardrails.format_citations(docs)]
-
-        parts += ["", "—" * 3, config.DISCLAIMER]
+            lines = [f"  [{c['index']}] {c['title']} — p.{c['page']}"
+                     + (f", {c['date']}" if c["date"] else "")
+                     + ("  ⚠️ >5yr" if not c["is_current"] else "")
+                     for c in r["citations"]]
+            parts += ["", "Sources:", "\n".join(lines)]
+        parts += ["", "—" * 3, r["disclaimer"]]
         return "\n".join(parts)
 
 
