@@ -44,14 +44,15 @@ def health():
 
 
 @app.post("/upload")
-def upload(file: UploadFile = File(...)):
-    """Ingest an uploaded PDF into an in-memory, session-only store and return a
-    session_id the client passes to /query to ask about that document."""
-    pdf_bytes = file.file.read()
-    retriever, n_chunks = _state["assistant"].build_session_retriever(pdf_bytes, file.filename)
+def upload(files: list[UploadFile] = File(...)):
+    """Ingest one or more uploaded PDFs into a single in-memory, session-only store
+    and return a session_id the client passes to /query to ask about those docs."""
+    payload = [(f.filename, f.file.read()) for f in files]
+    retriever, n_chunks, names = _state["assistant"].build_session_retriever(payload)
     session_id = uuid.uuid4().hex
     _sessions[session_id] = retriever
-    return {"session_id": session_id, "filename": file.filename, "n_chunks": n_chunks}
+    return {"session_id": session_id, "filenames": names,
+            "n_docs": len(names), "n_chunks": n_chunks}
 
 
 @app.post("/query")

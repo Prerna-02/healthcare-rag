@@ -111,30 +111,31 @@ with st.sidebar:
         st.error("Backend: offline ❌")
 
     st.divider()
-    st.subheader("Your document")
+    st.subheader("Your documents")
     st.caption("⚠️ Educational PDFs only — **do not upload patient data / PHI.** "
                "Files are processed in memory for this session only and are never stored.")
-    upload = st.file_uploader("Upload a PDF", type="pdf")
-    if upload is not None and st.session_state.get("uploaded_name") != upload.name:
-        with st.spinner(f"Indexing “{upload.name}”…"):
-            try:
-                resp = requests.post(
-                    f"{API_URL}/upload",
-                    files={"file": (upload.name, upload.getvalue(), "application/pdf")},
-                    timeout=300)
-                resp.raise_for_status()
-                info = resp.json()
-                st.session_state.session_id = info["session_id"]
-                st.session_state.uploaded_name = upload.name
-                st.success(f"Indexed ({info['n_chunks']} chunks)")
-            except requests.exceptions.RequestException as exc:
-                st.error(f"Upload failed: {exc}")
+    uploads = st.file_uploader("Upload PDF(s)", type="pdf", accept_multiple_files=True)
+    if uploads:
+        names = sorted(f.name for f in uploads)
+        # Re-index only when the set of files changes (added/removed).
+        if st.session_state.get("uploaded_names") != names:
+            with st.spinner(f"Indexing {len(uploads)} document(s)…"):
+                try:
+                    files = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploads]
+                    resp = requests.post(f"{API_URL}/upload", files=files, timeout=600)
+                    resp.raise_for_status()
+                    info = resp.json()
+                    st.session_state.session_id = info["session_id"]
+                    st.session_state.uploaded_names = names
+                    st.success(f"Indexed {info['n_docs']} doc(s) · {info['n_chunks']} chunks")
+                except requests.exceptions.RequestException as exc:
+                    st.error(f"Upload failed: {exc}")
 
-    # Source toggle — only offer the uploaded doc once one exists.
-    if st.session_state.get("session_id"):
+    # Source toggle — only offer the uploaded docs once at least one exists.
+    if st.session_state.get("session_id") and st.session_state.get("uploaded_names"):
+        n = len(st.session_state.uploaded_names)
         st.session_state.source = st.radio(
-            "Answer from:",
-            ["Guideline corpus", f"Uploaded: {st.session_state.uploaded_name}"])
+            "Answer from:", ["Guideline corpus", f"Uploaded: {n} document(s)"])
     else:
         st.session_state.source = "Guideline corpus"
 

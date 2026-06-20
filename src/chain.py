@@ -130,40 +130,46 @@ class Assistant:
         self.encoder = HuggingFaceCrossEncoder(model_name=config.RERANK_MODEL)
         self.retriever = R.get_retriever(self.store, self.chunks, encoder=self.encoder)
 
-    def build_session_retriever(self, pdf_bytes: bytes, filename: str):
-        """Ingest an UPLOADED PDF into an in-memory vector store (never persisted to
-        disk, never mixed into the curated corpus) and return a hybrid+rerank
-        retriever over just that document, plus its chunk count.
+    def build_session_retriever(self, files: list[tuple[str, bytes]]):
+        """Ingest one or MORE uploaded PDFs into a SINGLE in-memory vector store
+        (never persisted, never mixed into the curated corpus), so questions search
+        across all of them together. Returns (retriever, total_chunks, [filenames]).
 
-        Steps: write bytes to a temp file -> PyPDFLoader reads it -> split into
-        chunks -> tag as an uploaded source -> embed into an EPHEMERAL Chroma
-        (no persist_directory = in-memory) -> wrap in the Phase-3 retriever."""
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = tmp.name
-        try:
-            pages = PyPDFLoader(tmp_path).load()
-        finally:
-            os.unlink(tmp_path)                     # temp file removed immediately
-
+        Per file: write bytes to a temp file -> PyPDFLoader reads it -> split into
+        chunks -> tag as an uploaded source. All chunks then go into ONE ephemeral
+        Chroma (no persist_directory = in-memory) wrapped in the Phase-3 retriever."""
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP,
             separators=["\n\n", "\n", ". ", " ", ""])
-        chunks = splitter.split_documents(pages)
-        for chunk in chunks:
-            chunk.metadata.update({
-                "source_filename": filename,
-                "source_title": f"(uploaded) {filename}",
-                "source_url": "",
-                "publication_date": "unknown",
-                "evidence_level": "user_upload",
-                "medical_specialty": "uploaded",
-                "is_current": True,            # unknown date -> don't flag as stale
-            })
-        # No persist_directory -> ChromaDB keeps this in memory only.
-        store = Chroma.from_documents(chunks, self.embeddings)
-        retriever = R.get_retriever(store, chunks, encoder=self.encoder)
-        return retriever, len(chunks)
+
+        all_chunks, names = [], []
+        for filename, pdf_bytes in files:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(pdf_bytes)
+                tmp_path = tmp.name
+            try:
+                pages = PyPDFLoader(tmp_path).load()
+            finally:
+                os.unlink(tmp_path)                 # temp file removed immediately
+
+            chunks = splitter.split_documents(pages)
+            for chunk in chunks:
+                chunk.metadata.update({
+                    "source_filename": filename,
+                    "source_title": f"(uploaded) {filename}",
+                    "source_url": "",
+                    "publication_date": "unknown",
+                    "evidence_level": "user_upload",
+                    "medical_specialty": "uploaded",
+                    "is_current": True,            # unknown date -> don't flag as stale
+                })
+            all_chunks.extend(chunks)
+            names.append(filename)
+
+        # No persist_directory -> ChromaDB keeps this combined index in memory only.
+        store = Chroma.from_documents(all_chunks, self.embeddings)
+        retriever = R.get_retriever(store, all_chunks, encoder=self.encoder)
+        return retriever, len(all_chunks), names
 
     def answer_structured(self, question: str, history: list[dict] | None = None,
                           retriever=None) -> dict:
