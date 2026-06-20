@@ -9,10 +9,14 @@ Built for medical professionals and students. **Not a substitute for clinical ju
 ## What It Does
 
 - Answers medical questions grounded strictly in your indexed document corpus
-- Returns cited sources (title, page, evidence level) with every answer
+- Returns cited sources (title, page, publication date) with every answer
 - Scores retrieval confidence so you know when to trust the answer
-- Refuses out-of-scope queries (patient diagnosis, emergency guidance, prescribing)
-- Evaluated against five RAGAS metrics to quantify and reduce hallucination
+- Refuses out-of-scope queries (patient diagnosis, emergency guidance, prescribing) via a layered classifier
+- Flags sources older than 5 years and surfaces multi-source answers
+- Handles **conversational follow-ups** ("explain that in more detail") by resolving them against chat history
+- Lets you **upload your own PDFs** and ask about them — kept in memory for the session only, never persisted
+- Served as a **web app**: a FastAPI JSON backend + a Streamlit chat UI
+- Evaluated against five RAGAS metrics (fully local judge) to quantify and reduce hallucination
 
 ---
 
@@ -45,6 +49,12 @@ PDFs / Guidelines / Papers
          ▼
     RAGAS Evaluation           Faithfulness · Answer Relevancy · Context Precision
                                Context Recall · Hallucination Rate
+
+  ── served over a web app (Phase 6) ──
+    FastAPI backend (api.py)   POST /query  ·  POST /upload  ·  GET /health   → JSON
+         ▲
+         │ HTTP
+    Streamlit frontend (app.py)  chat · confidence badge · citation cards · PDF upload
 ```
 
 ---
@@ -166,6 +176,15 @@ JSON response: the answer, a confidence badge, citation cards (with source
 snippets), staleness warnings, and the persistent disclaimer banner. Build the
 vector store first with `python -m src.ingest` if you haven't already.
 
+**Conversational follow-ups:** a vague follow-up like *"explain that in more
+detail"* is rewritten into a standalone question using recent chat history before
+retrieval, so it resolves correctly.
+
+**Upload your own documents:** use the sidebar uploader to add one or more PDFs.
+They're ingested into an **in-memory, session-only** store (never written to disk
+or mixed into the curated corpus), and a toggle lets you ask the guideline corpus
+or your uploaded documents. Educational PDFs only — do not upload patient data / PHI.
+
 ---
 
 ## Development Phases
@@ -175,9 +194,9 @@ vector store first with `python -m src.ingest` if you haven't already.
 | 1 | 1 | Basic RAG: single PDF → ChromaDB → Ollama → cited answer | `phase1_starter_code.py` |
 | 2 | 2 | Multi-doc ingestion with metadata tagging | `src/ingest.py` |
 | 3 | 3 | Hybrid search (BM25 + semantic) + CrossEncoder re-ranking | `src/retriever.py` |
-| 4 | 4 | Full guardrails: query classifier, confidence scoring, citation formatter | `src/guardrails.py` |
-| 5 | 5 | RAGAS evaluation suite across all 5 metrics | `eval/evaluate.py` |
-| 6 | 6 | Streamlit UI: chat interface, citation cards, confidence badges | `app.py` |
+| 4 | 4 | Full guardrails: layered query classifier, confidence scoring, citation formatter | `src/guardrails.py` |
+| 5 | 5 | RAGAS evaluation suite across all 5 metrics (local judge) | `eval/evaluate.py` |
+| 6 | 6 | Web app: FastAPI backend + Streamlit chat UI, conversational follow-ups, PDF upload | `api.py`, `app.py` |
 
 ---
 
