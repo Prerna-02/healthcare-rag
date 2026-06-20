@@ -20,6 +20,7 @@ Run the interactive assistant:
 """
 import math
 import os
+import re
 import sys
 import tempfile
 
@@ -47,7 +48,10 @@ STRICT RULES:
    Never use outside knowledge to answer a medical question.
 2. NEVER diagnose a specific person, interpret an individual's symptoms, or recommend a
    drug or dose for an individual.
-3. Cite the source for every factual claim.
+3. Do NOT copy the source documents' own reference or citation numbers (e.g. "(1)",
+   "(10, 11)", "[12]") into your answer — they refer to those documents' internal
+   bibliographies and are meaningless to the reader. Write plain prose; provenance is
+   shown separately in a Sources list.
 4. If the evidence is limited or sources conflict, say so explicitly. Do not overstate certainty."""
 
 
@@ -81,7 +85,21 @@ def generate(question: str, context: str) -> tuple[str, bool]:
         think=False,
         options={"temperature": config.LLM_TEMPERATURE, "num_predict": config.LLM_NUM_PREDICT},
     )
-    return resp.message.content.strip(), resp.done_reason == "length"
+    return _strip_source_refs(resp.message.content.strip()), resp.done_reason == "length"
+
+
+# Source PDFs carry their own bibliography numbers like "(1)" or "(10, 11)" that the
+# model tends to copy. They don't map to our Sources list and would mislead readers,
+# so we strip them deterministically (the prompt asks too, but an 8B model isn't
+# reliable). 1-3 digit groups only -> 4-digit years like "(2023)" and unit values
+# like "(4.5 kg)" are left untouched.
+_REF_PATTERN = re.compile(r"\s*[\(\[]\d{1,3}(?:\s*[,;]\s*\d{1,3})*[\)\]]")
+
+
+def _strip_source_refs(text: str) -> str:
+    cleaned = _REF_PATTERN.sub("", text)
+    cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned)   # tidy space-before-punctuation
+    return re.sub(r" {2,}", " ", cleaned).strip()
 
 
 # When the model can't answer from context it emits this phrase (per SYSTEM_PROMPT).

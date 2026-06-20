@@ -100,17 +100,6 @@ st.title("⚕️ Healthcare Knowledge Navigator")
 st.warning(DISCLAIMER_BANNER)   # re-rendered every run -> a persistent banner
 
 with st.sidebar:
-    # Backend connection status.
-    try:
-        ok = requests.get(f"{API_URL}/health", timeout=5).json().get("assistant_loaded")
-        if ok:
-            st.success("Backend: connected ✅")
-        else:
-            st.warning("Backend: starting…")
-    except requests.exceptions.RequestException:
-        st.error("Backend: offline ❌")
-
-    st.divider()
     st.subheader("Your documents")
     st.caption("⚠️ Educational PDFs only — **do not upload patient data / PHI.** "
                "Files are processed in memory for this session only and are never stored.")
