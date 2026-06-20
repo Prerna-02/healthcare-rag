@@ -9,10 +9,14 @@ Built for medical professionals and students. **Not a substitute for clinical ju
 ## What It Does
 
 - Answers medical questions grounded strictly in your indexed document corpus
-- Returns cited sources (title, page, evidence level) with every answer
+- Returns cited sources (title, page, publication date) with every answer
 - Scores retrieval confidence so you know when to trust the answer
-- Refuses out-of-scope queries (patient diagnosis, emergency guidance, prescribing)
-- Evaluated against five RAGAS metrics to quantify and reduce hallucination
+- Refuses out-of-scope queries (patient diagnosis, emergency guidance, prescribing) via a layered classifier
+- Flags sources older than 5 years and surfaces multi-source answers
+- Handles **conversational follow-ups** ("explain that in more detail") by resolving them against chat history
+- Lets you **upload your own PDFs** and ask about them — kept in memory for the session only, never persisted
+- Served as a **web app**: a FastAPI JSON backend + a Streamlit chat UI
+- Evaluated against five RAGAS metrics (fully local judge) to quantify and reduce hallucination
 
 ---
 
@@ -45,6 +49,12 @@ PDFs / Guidelines / Papers
          ▼
     RAGAS Evaluation           Faithfulness · Answer Relevancy · Context Precision
                                Context Recall · Hallucination Rate
+
+  ── served over a web app (Phase 6) ──
+    FastAPI backend (api.py)   POST /query  ·  POST /upload  ·  GET /health   → JSON
+         ▲
+         │ HTTP
+    Streamlit frontend (app.py)  chat · confidence badge · citation cards · PDF upload
 ```
 
 ---
@@ -55,13 +65,14 @@ PDFs / Guidelines / Papers
 healthcare-rag/
 ├── config.py                  # all settings in one place (models, paths, thresholds)
 ├── phase1_starter_code.py     # Phase 1 entry point — run this first
-├── app.py                     # Phase 6 — Streamlit UI
+├── api.py                     # Phase 6 — FastAPI backend (POST /query -> JSON)
+├── app.py                     # Phase 6 — Streamlit frontend (calls the API)
 │
 ├── src/
 │   ├── ingest.py              # Phase 2: multi-doc loader, chunker, embedder
 │   ├── retriever.py           # Phase 3: hybrid search + re-ranker
-│   ├── chain.py               # Phase 4: full RAG chain (refactored from Phase 1)
-│   └── guardrails.py          # Phase 4: query classifier, confidence scorer
+│   ├── chain.py               # Phase 4: guarded RAG pipeline (Assistant)
+│   └── guardrails.py          # Phase 4: query classifier, confidence, citations
 │
 ├── eval/
 │   ├── dataset.json           # ground truth Q&A pairs (build in Phase 5)
@@ -147,11 +158,32 @@ python phase1_starter_code.py
 
 The script runs five built-in test queries (including emergency and refusal cases), then drops into interactive mode. Type `quit` to exit.
 
-### Phase 6 — Streamlit app (coming)
+### Phase 6 — Web app (FastAPI backend + Streamlit frontend)
+
+The UI is split into a JSON API and a thin client. Run each in its own terminal
+(both inside the `healthcare-rag` conda env, with Ollama running):
 
 ```bash
-streamlit run app.py
+# Terminal 1 — backend (loads the models once; ~1 min to start)
+uvicorn api:app --port 8000          # API docs at http://localhost:8000/docs
+
+# Terminal 2 — frontend
+streamlit run app.py                 # opens http://localhost:8501
 ```
+
+The Streamlit app POSTs each question to the API's `POST /query` and renders the
+JSON response: the answer, a confidence badge, citation cards (with source
+snippets), staleness warnings, and the persistent disclaimer banner. Build the
+vector store first with `python -m src.ingest` if you haven't already.
+
+**Conversational follow-ups:** a vague follow-up like *"explain that in more
+detail"* is rewritten into a standalone question using recent chat history before
+retrieval, so it resolves correctly.
+
+**Upload your own documents:** use the sidebar uploader to add one or more PDFs.
+They're ingested into an **in-memory, session-only** store (never written to disk
+or mixed into the curated corpus), and a toggle lets you ask the guideline corpus
+or your uploaded documents. Educational PDFs only — do not upload patient data / PHI.
 
 ---
 
@@ -162,9 +194,9 @@ streamlit run app.py
 | 1 | 1 | Basic RAG: single PDF → ChromaDB → Ollama → cited answer | `phase1_starter_code.py` |
 | 2 | 2 | Multi-doc ingestion with metadata tagging | `src/ingest.py` |
 | 3 | 3 | Hybrid search (BM25 + semantic) + CrossEncoder re-ranking | `src/retriever.py` |
-| 4 | 4 | Full guardrails: query classifier, confidence scoring, citation formatter | `src/guardrails.py` |
-| 5 | 5 | RAGAS evaluation suite across all 5 metrics | `eval/evaluate.py` |
-| 6 | 6 | Streamlit UI: chat interface, citation cards, confidence badges | `app.py` |
+| 4 | 4 | Full guardrails: layered query classifier, confidence scoring, citation formatter | `src/guardrails.py` |
+| 5 | 5 | RAGAS evaluation suite across all 5 metrics (local judge) | `eval/evaluate.py` |
+| 6 | 6 | Web app: FastAPI backend + Streamlit chat UI, conversational follow-ups, PDF upload | `api.py`, `app.py` |
 
 ---
 
